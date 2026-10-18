@@ -1,0 +1,278 @@
+import { authorizedFetch } from "@/lib/api/auth";
+
+export const MAX_COURSE_CONTENT_UPLOAD_BYTES = 50 * 1024 * 1024;
+export const SUPPORTED_COURSE_CONTENT_EXTENSIONS = ["pdf", "docx", "pptx"] as const;
+export const SUPPORTED_COURSE_CONTENT_ACCEPT = ".pdf,.docx,.pptx";
+
+export type SupportedCourseContentExtension =
+  (typeof SUPPORTED_COURSE_CONTENT_EXTENSIONS)[number];
+
+export type CourseContentPreviewStatus = "pending" | "ready" | "failed";
+export type CourseContentRagStatus = "pending" | "ready" | "failed";
+export type CourseContentSourceType = SupportedCourseContentExtension;
+
+export type CourseContentRecord = {
+  id: number;
+  material_name: string;
+  access_url: string;
+  data_size: number;
+  project_id?: number | null;
+  content_sha256?: string | null;
+  source_type?: CourseContentSourceType | null;
+  preview_status?: CourseContentPreviewStatus;
+  preview_count?: number;
+  rag_status?: CourseContentRagStatus | null;
+  rag_chunk_count?: number;
+  rag_error?: string | null;
+  uploaded_at?: string | null;
+};
+
+export type CourseContentPreviewItem = {
+  id: string;
+  index: number;
+  kind: "page" | "slide";
+  label: string;
+  title: string;
+  subtitle: string;
+  image_url: string;
+  width: number;
+  height: number;
+};
+
+export type CourseContentPreviewManifest = {
+  course_content_id: number;
+  material_name: string;
+  source_type: CourseContentSourceType;
+  preview_status: CourseContentPreviewStatus;
+  preview_count: number;
+  access_url: string;
+  preview_error?: string | null;
+  items: CourseContentPreviewItem[];
+};
+
+const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
+const SUPPORTED_EXTENSION_SET = new Set<string>(SUPPORTED_COURSE_CONTENT_EXTENSIONS);
+
+export async function uploadCourseContent({
+  accessToken,
+  file,
+  projectId,
+}: {
+  accessToken: string;
+  file: File;
+  projectId: number;
+}): Promise<CourseContentRecord> {
+  const validationError = getCourseContentFileValidationError(file);
+
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
+  const formData = new FormData();
+  formData.append("project_id", String(projectId));
+  formData.append("file", file);
+
+  const response = await authorizedFetch(`${getApiBaseUrl()}/upload-doc`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: formData,
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as
+    | CourseContentRecord
+    | { detail?: string };
+
+  if (!response.ok) {
+    throw new Error(
+      "detail" in payload && payload.detail
+        ? payload.detail
+        : "Unable to upload file.",
+    );
+  }
+
+  return payload as CourseContentRecord;
+}
+
+export async function getCourseContentPreview(
+  courseContentId: number,
+  accessToken: string,
+): Promise<CourseContentPreviewManifest> {
+  const response = await authorizedFetch(`${getApiBaseUrl()}/course-contents/${courseContentId}/preview`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as
+    | CourseContentPreviewManifest
+    | { detail?: string };
+
+  if (!response.ok) {
+    throw new Error(
+      "detail" in payload && payload.detail
+        ? payload.detail
+        : "Unable to load preview.",
+    );
+  }
+
+  return payload as CourseContentPreviewManifest;
+}
+
+export type CourseContentFile = {
+  course_content_id: number;
+  material_name: string;
+  source_type?: CourseContentSourceType | null;
+  url: string;
+  content_type?: string | null;
+  size?: number | null;
+};
+
+// Resolves the original upload. The API checks the object exists first, so a missing
+// file surfaces as a readable error instead of the storage provider's XML error page.
+export async function getCourseContentFile(
+  courseContentId: number,
+  accessToken: string,
+): Promise<CourseContentFile> {
+  const response = await authorizedFetch(`${getApiBaseUrl()}/course-contents/${courseContentId}/file`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as
+    | CourseContentFile
+    | { detail?: string };
+
+  if (!response.ok) {
+    throw new Error(
+      "detail" in payload && payload.detail
+        ? payload.detail
+        : "Unable to load the original file.",
+    );
+  }
+
+  return payload as CourseContentFile;
+}
+
+export async function renameCourseContent({
+  accessToken,
+  courseContentId,
+  materialName,
+}: {
+  accessToken: string;
+  courseContentId: number;
+  materialName: string;
+}): Promise<CourseContentRecord> {
+  const response = await authorizedFetch(`${getApiBaseUrl()}/course-contents/${courseContentId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ material_name: materialName.trim() }),
+  });
+
+  const payload = (await response.json().catch(() => ({}))) as
+    | CourseContentRecord
+    | { detail?: string };
+
+  if (!response.ok) {
+    throw new Error(
+      "detail" in payload && payload.detail
+        ? payload.detail
+        : "Unable to rename source.",
+    );
+  }
+
+  return payload as CourseContentRecord;
+}
+
+export async function deleteCourseContent({
+  accessToken,
+  courseContentId,
+}: {
+  accessToken: string;
+  courseContentId: number;
+}): Promise<void> {
+  const response = await authorizedFetch(`${getApiBaseUrl()}/course-contents/${courseContentId}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  if (response.ok) {
+    return;
+  }
+
+  throw new Error(await readCourseContentErrorMessage(response, "Unable to delete source."));
+}
+
+export function getCourseContentFileValidationError(file: File): string | null {
+  const extension = getCourseContentExtension(file.name);
+
+  if (!extension || !SUPPORTED_EXTENSION_SET.has(extension)) {
+    return "Only PDF, DOCX, and PPTX files are supported.";
+  }
+
+  if (file.size === 0) {
+    return "Uploaded file is empty.";
+  }
+
+  if (file.size > MAX_COURSE_CONTENT_UPLOAD_BYTES) {
+    return "Uploaded file is too large. Max file size is 50MB.";
+  }
+
+  return null;
+}
+
+export function formatCourseContentSize(size: number): string {
+  if (size < 1024 * 1024) {
+    return `${Math.max(1, Math.round(size / 1024))} KB`;
+  }
+
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function getCourseContentExtension(
+  fileName: string,
+): SupportedCourseContentExtension | null {
+  const match = fileName.toLowerCase().match(/\.([a-z0-9]+)$/);
+  const extension = match?.[1];
+
+  if (!extension || !SUPPORTED_EXTENSION_SET.has(extension)) {
+    return null;
+  }
+
+  return extension as SupportedCourseContentExtension;
+}
+
+export function getApiBaseUrl(): string {
+  const configuredUrl =
+    process.env.NEXT_PUBLIC_API_BASE_URL ||
+    DEFAULT_API_BASE_URL;
+
+  return configuredUrl.replace(/\/+$/, "");
+}
+
+async function readCourseContentErrorMessage(
+  response: Response,
+  fallbackMessage: string,
+): Promise<string> {
+  const payload = (await response.json().catch(() => ({}))) as unknown;
+
+  if (
+    typeof payload === "object" &&
+    payload !== null &&
+    "detail" in payload &&
+    typeof payload.detail === "string"
+  ) {
+    return payload.detail;
+  }
+
+  return fallbackMessage;
+}
